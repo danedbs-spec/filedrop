@@ -552,12 +552,22 @@ async function startSend(){
   const files=[...pendingFiles];
   cancelSend();
 
-  // Ensure DC is open
+  // Always get fresh connection
   let dc=dataChannels[targetId];
   if(!dc||dc.readyState!=='open'){
     toast('🔄 Menghubungkan ke peer...');
+    // Reset broken peer first
+    const existing=peers[targetId];
+    if(existing&&(existing.connectionState==='failed'||existing.connectionState==='closed'||!dc||dc.readyState!=='open')){
+      resetPeer(targetId);
+      initPeer(targetId,true);
+    }
     dc=await waitForDC(targetId);
-    if(!dc){toast('❌ Gagal terhubung ke peer.');return;}
+    if(!dc){
+      toast('❌ Gagal terhubung. Coba klik Kirim lagi.',4000);
+      resetPeer(targetId);
+      return;
+    }
   }
 
   // Show xfer card
@@ -575,6 +585,15 @@ async function startSend(){
     await sendOne(dc, files[i], i, xid);
   }
   toast('🎉 Semua file terkirim ke '+(members[targetId]?.name||'?')+'!',4000);
+  // Reset peer so next transfer works fresh
+  setTimeout(()=>resetPeer(targetId), 2000);
+}
+
+function resetPeer(id){
+  const pc=peers[id];
+  if(pc){try{pc.close();}catch(e){}}
+  delete peers[id];
+  delete dataChannels[id];
 }
 
 function waitForDC(targetId){
@@ -632,11 +651,13 @@ function initPeer(targetId, isInitiator){
     dc.binaryType='arraybuffer';
     setupDC(dc, targetId);
     dataChannels[targetId]=dc;
-    // Create offer
+    // Create offer — use trickle ICE for faster connection
     pc.createOffer().then(offer=>pc.setLocalDescription(offer))
-      .then(()=>gatherICE(pc))
-      .then(()=>wsSend({type:'offer',to:targetId,room:roomCode,
-        data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}}));
+      .then(()=>{
+        // Send offer immediately, ICE candidates sent via onicecandidate
+        wsSend({type:'offer',to:targetId,room:roomCode,
+          data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
+      }).catch(e=>console.warn('createOffer error:',e));
   } else {
     pc.ondatachannel=e=>{
       const dc=e.channel; dc.binaryType='arraybuffer';
@@ -649,7 +670,19 @@ function initPeer(targetId, isInitiator){
 
 function setupDC(dc, fromId){
   let pendingHdr=null;
-  dc.onopen=()=>console.log('DC open with',members[fromId]?.name||fromId);
+  dc.onopen=()=>{ console.log('DC open with',members[fromId]?.name||fromId); };
+  dc.onclose=()=>{
+    console.log('DC closed with',members[fromId]?.name||fromId);
+    // Clean up so next send re-initiates
+    if(dataChannels[fromId]===dc){
+      delete dataChannels[fromId];
+      const pc=peers[fromId];
+      if(pc&&(pc.connectionState==='closed'||pc.connectionState==='failed')){
+        delete peers[fromId];
+      }
+    }
+  };
+  dc.onerror=e=>{ console.warn('DC error',e); };
   dc.onmessage=e=>{
     if(typeof e.data==='string'){
       const msg=JSON.parse(e.data);
@@ -663,19 +696,28 @@ function setupDC(dc, fromId){
 }
 
 async function handleOffer(fromId, sdp){
+  // Always create fresh peer for incoming offer
   let pc=peers[fromId];
+  if(pc&&(pc.signalingState!=='stable'||pc.connectionState==='failed'||pc.connectionState==='closed')){
+    try{pc.close();}catch(e){}
+    delete peers[fromId]; delete dataChannels[fromId]; pc=null;
+  }
   if(!pc) pc=initPeer(fromId, false);
-  await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  try{ await pc.setRemoteDescription(new RTCSessionDescription(sdp)); }
+  catch(e){ console.warn('setRemoteDesc error:',e); resetPeer(fromId); return; }
   const answer=await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  await gatherICE(pc);
+  // Send answer immediately (trickle ICE)
   wsSend({type:'answer',to:fromId,room:roomCode,
     data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
 }
 
 async function handleAnswer(fromId, sdp){
   const pc=peers[fromId]; if(!pc) return;
-  await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  if(pc.signalingState==='have-local-offer'){
+    try{ await pc.setRemoteDescription(new RTCSessionDescription(sdp)); }
+    catch(e){ console.warn('setRemoteDesc answer error:',e); }
+  }
 }
 
 async function handleIce(fromId, candidate){
