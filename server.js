@@ -301,6 +301,11 @@ const ICE = [
   {urls:'stun:stun.l.google.com:19302'},
   {urls:'stun:stun1.l.google.com:19302'},
   {urls:'stun:stun2.l.google.com:19302'},
+  {urls:'stun:stun3.l.google.com:19302'},
+  {urls:'turn:a.relay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:a.relay.metered.ca:80?transport=tcp',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:a.relay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+  {urls:'turn:a.relay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'},
 ];
 const CHUNK = 64*1024;
 const COLORS = ['#5b8dee','#ee5b9b','#5beea0','#eeb85b','#c45bee','#ee8d5b','#5beee8','#ee5b5b'];
@@ -496,8 +501,16 @@ function selectTarget(id, name){
   pendingFiles=[];
   renderFL();
   $('btnSend').disabled=true;
-  // Pre-connect WebRTC if not already
-  if(!peers[id]) initPeer(id, true);
+  // Always pre-connect WebRTC (reinit if broken)
+  const existing=peers[id];
+  const dc=dataChannels[id];
+  const needsInit=!existing||existing.connectionState==='failed'||existing.connectionState==='closed'
+    ||!dc||dc.readyState==='closed';
+  if(needsInit){
+    if(existing){try{existing.close();}catch(e){}}
+    delete peers[id]; delete dataChannels[id];
+    initPeer(id,true);
+  }
 }
 
 function cancelSend(){
@@ -566,11 +579,11 @@ async function startSend(){
 
 function waitForDC(targetId){
   return new Promise(resolve=>{
-    const t=setTimeout(()=>resolve(null),12000);
+    const t=setTimeout(()=>resolve(null),25000);
     function check(){
       const dc=dataChannels[targetId];
       if(dc&&dc.readyState==='open'){clearTimeout(t);resolve(dc);}
-      else setTimeout(check,200);
+      else setTimeout(check,300);
     }
     check();
   });
@@ -673,9 +686,12 @@ async function handleIce(fromId, candidate){
 function gatherICE(pc){
   return new Promise(resolve=>{
     if(pc.iceGatheringState==='complete'){resolve();return;}
-    pc.onicegatheringstatechange=()=>{ if(pc.iceGatheringState==='complete') resolve(); };
-    pc.onicecandidate=e=>{ if(!e.candidate) resolve(); };
-    setTimeout(resolve,4000);
+    const done=()=>resolve();
+    const prev1=pc.onicegatheringstatechange;
+    pc.onicegatheringstatechange=()=>{ if(prev1)prev1(); if(pc.iceGatheringState==='complete')done(); };
+    const prev2=pc.onicecandidate;
+    pc.onicecandidate=e=>{ if(prev2)prev2(e); if(!e.candidate)done(); };
+    setTimeout(done,5000);
   });
 }
 
