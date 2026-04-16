@@ -636,7 +636,8 @@ function initPeer(targetId, isInitiator){
   peers[targetId]=pc;
 
   pc.onicecandidate=e=>{
-    if(e.candidate) wsSend({type:'ice',to:targetId,room:roomCode,data:e.candidate});
+    // ICE candidates sudah ter-embed di SDP (full gathering)
+    // Tidak perlu relay trickle candidate terpisah
   };
 
   pc.onconnectionstatechange=()=>{
@@ -650,10 +651,11 @@ function initPeer(targetId, isInitiator){
     dc.binaryType='arraybuffer';
     setupDC(dc, targetId);
     dataChannels[targetId]=dc;
-    // Create offer — use trickle ICE for faster connection
-    pc.createOffer().then(offer=>pc.setLocalDescription(offer))
+    // Create offer — tunggu ICE gathering selesai (lebih reliable)
+    pc.createOffer()
+      .then(offer=>pc.setLocalDescription(offer))
+      .then(()=>waitForGathering(pc))
       .then(()=>{
-        // Send offer immediately, ICE candidates sent via onicecandidate
         wsSend({type:'offer',to:targetId,room:roomCode,
           data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
       }).catch(e=>console.warn('createOffer error:',e));
@@ -708,7 +710,8 @@ async function handleOffer(fromId, sdp){
   await flushIceQueue(fromId);
   const answer=await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  // Send answer immediately (trickle ICE)
+  // Tunggu ICE gathering selesai sebelum kirim answer
+  await waitForGathering(pc);
   wsSend({type:'answer',to:fromId,room:roomCode,
     data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
 }
@@ -726,16 +729,16 @@ async function handleAnswer(fromId, sdp){
 }
 
 async function handleIce(fromId, candidate){
+  // Dengan full gathering, ICE candidates sudah embedded di SDP
+  // Tapi tetap handle jika ada trickle candidate
   const pc=peers[fromId];
-  if(!pc||!pc.remoteDescription){
-    // Queue candidate until remoteDescription is ready
+  if(!pc) return;
+  if(!pc.remoteDescription){
     if(!iceQueues[fromId]) iceQueues[fromId]=[];
     iceQueues[fromId].push(candidate);
     return;
   }
-  try{ await pc.addIceCandidate(new RTCIceCandidate(candidate)); }catch(e){
-    console.warn('addIceCandidate error:',e.message);
-  }
+  try{ await pc.addIceCandidate(new RTCIceCandidate(candidate)); }catch(_){}
 }
 
 async function flushIceQueue(fromId){
@@ -744,23 +747,26 @@ async function flushIceQueue(fromId){
   const q=iceQueues[fromId]||[];
   iceQueues[fromId]=[];
   for(const c of q){
-    try{ await pc.addIceCandidate(new RTCIceCandidate(c)); }catch(e){
-      console.warn('flushIce error:',e.message);
-    }
+    try{ await pc.addIceCandidate(new RTCIceCandidate(c)); }catch(_){}
   }
 }
 
-function gatherICE(pc){
+function waitForGathering(pc){
   return new Promise(resolve=>{
     if(pc.iceGatheringState==='complete'){resolve();return;}
-    const done=()=>resolve();
-    const prev1=pc.onicegatheringstatechange;
-    pc.onicegatheringstatechange=()=>{ if(prev1)prev1(); if(pc.iceGatheringState==='complete')done(); };
-    const prev2=pc.onicecandidate;
-    pc.onicecandidate=e=>{ if(prev2)prev2(e); if(!e.candidate)done(); };
-    setTimeout(done,5000);
+    const timeout=setTimeout(resolve, 5000); // max 5 detik
+    pc.addEventListener('icegatheringstatechange',function handler(){
+      if(pc.iceGatheringState==='complete'){
+        clearTimeout(timeout);
+        pc.removeEventListener('icegatheringstatechange',handler);
+        resolve();
+      }
+    });
   });
 }
+
+// Alias
+function gatherICE(pc){ return waitForGathering(pc); }
 
 // ════════════════════════════════════════════════
 // RECEIVE
