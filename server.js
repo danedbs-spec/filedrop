@@ -859,6 +859,12 @@ window.addEventListener('load',()=>{
 
 // ── WebSocket Signaling Server ───────────────────────
 const server = http.createServer((req, res) => {
+  // Health check / keep-alive endpoint
+  if (req.url === '/ping' || req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(HTML);
 });
@@ -939,4 +945,22 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, () => {
   console.log(`FileDrop Group Server on port ${PORT}`);
+
+  // ── Keep-alive: ping diri sendiri setiap 10 menit ──
+  // Mencegah Render free tier sleep
+  const APP_URL = process.env.RENDER_EXTERNAL_URL || null;
+  if (APP_URL) {
+    const https = require('https');
+    const http2 = require('http');
+    setInterval(() => {
+      const url = APP_URL.startsWith('https') ? APP_URL : APP_URL;
+      const mod = url.startsWith('https') ? https : http2;
+      mod.get(url + '/ping', (res) => {
+        console.log(`[keep-alive] ping ${res.statusCode}`);
+      }).on('error', (e) => {
+        console.log(`[keep-alive] error: ${e.message}`);
+      });
+    }, 10 * 60 * 1000); // 10 menit
+    console.log(`Keep-alive aktif → ${APP_URL}`);
+  }
 });
