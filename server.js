@@ -947,20 +947,25 @@ server.listen(PORT, () => {
   console.log(`FileDrop Group Server on port ${PORT}`);
 
   // ── Keep-alive: ping diri sendiri setiap 10 menit ──
-  // Mencegah Render free tier sleep
-  const APP_URL = process.env.RENDER_EXTERNAL_URL || null;
+  // Bekerja di Railway maupun Render
+  const APP_URL = process.env.APP_URL
+    || process.env.RAILWAY_STATIC_URL
+    || process.env.RENDER_EXTERNAL_URL
+    || null;
   if (APP_URL) {
     const https = require('https');
-    const http2 = require('http');
+    const httpMod = require('http');
     setInterval(() => {
-      const url = APP_URL.startsWith('https') ? APP_URL : APP_URL;
-      const mod = url.startsWith('https') ? https : http2;
-      mod.get(url + '/ping', (res) => {
-        console.log(`[keep-alive] ping ${res.statusCode}`);
+      const mod = APP_URL.startsWith('https') ? https : httpMod;
+      const target = APP_URL.replace(/\/+$/, '') + '/ping';
+      mod.get(target, (res) => {
+        console.log('[keep-alive] ping', res.statusCode);
       }).on('error', (e) => {
-        console.log(`[keep-alive] error: ${e.message}`);
+        console.log('[keep-alive] error:', e.message);
       });
-    }, 10 * 60 * 1000); // 10 menit
-    console.log(`Keep-alive aktif → ${APP_URL}`);
+    }, 10 * 60 * 1000); // setiap 10 menit
+    console.log('[keep-alive] aktif →', APP_URL);
+  } else {
+    console.log('[keep-alive] APP_URL tidak di-set, skip.');
   }
 });
