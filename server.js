@@ -318,6 +318,7 @@ let myId=null, myName='', roomCode='';
 let members={};       // {id:{name,color}}
 let peers={};         // {id: RTCPeerConnection}
 let dataChannels={};  // {id: RTCDataChannel}
+let iceQueues={};     // {id: [candidates]} — buffer until remoteDesc is set
 let sendTarget=null;
 let pendingFiles=[];
 let recvBufs={}, recvMeta={};
@@ -555,16 +556,13 @@ async function startSend(){
   // Always get fresh connection
   let dc=dataChannels[targetId];
   if(!dc||dc.readyState!=='open'){
-    toast('🔄 Menghubungkan ke peer...');
-    // Reset broken peer first
-    const existing=peers[targetId];
-    if(existing&&(existing.connectionState==='failed'||existing.connectionState==='closed'||!dc||dc.readyState!=='open')){
-      resetPeer(targetId);
-      initPeer(targetId,true);
-    }
+    toast('🔄 Menghubungkan...',1500);
+    // Always reset and reinit for clean connection
+    resetPeer(targetId);
+    initPeer(targetId,true);
     dc=await waitForDC(targetId);
     if(!dc){
-      toast('❌ Gagal terhubung. Coba klik Kirim lagi.',4000);
+      toast('❌ Gagal terhubung. Tunggu sebentar lalu coba lagi.',4000);
       resetPeer(targetId);
       return;
     }
@@ -594,6 +592,7 @@ function resetPeer(id){
   if(pc){try{pc.close();}catch(e){}}
   delete peers[id];
   delete dataChannels[id];
+  delete iceQueues[id];
 }
 
 function waitForDC(targetId){
@@ -705,6 +704,8 @@ async function handleOffer(fromId, sdp){
   if(!pc) pc=initPeer(fromId, false);
   try{ await pc.setRemoteDescription(new RTCSessionDescription(sdp)); }
   catch(e){ console.warn('setRemoteDesc error:',e); resetPeer(fromId); return; }
+  // Flush any queued ICE candidates
+  await flushIceQueue(fromId);
   const answer=await pc.createAnswer();
   await pc.setLocalDescription(answer);
   // Send answer immediately (trickle ICE)
@@ -715,14 +716,38 @@ async function handleOffer(fromId, sdp){
 async function handleAnswer(fromId, sdp){
   const pc=peers[fromId]; if(!pc) return;
   if(pc.signalingState==='have-local-offer'){
-    try{ await pc.setRemoteDescription(new RTCSessionDescription(sdp)); }
+    try{
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      // Flush any queued ICE candidates
+      await flushIceQueue(fromId);
+    }
     catch(e){ console.warn('setRemoteDesc answer error:',e); }
   }
 }
 
 async function handleIce(fromId, candidate){
-  const pc=peers[fromId]; if(!pc) return;
-  try{ await pc.addIceCandidate(new RTCIceCandidate(candidate)); }catch(_){}
+  const pc=peers[fromId];
+  if(!pc||!pc.remoteDescription){
+    // Queue candidate until remoteDescription is ready
+    if(!iceQueues[fromId]) iceQueues[fromId]=[];
+    iceQueues[fromId].push(candidate);
+    return;
+  }
+  try{ await pc.addIceCandidate(new RTCIceCandidate(candidate)); }catch(e){
+    console.warn('addIceCandidate error:',e.message);
+  }
+}
+
+async function flushIceQueue(fromId){
+  const pc=peers[fromId];
+  if(!pc||!pc.remoteDescription) return;
+  const q=iceQueues[fromId]||[];
+  iceQueues[fromId]=[];
+  for(const c of q){
+    try{ await pc.addIceCandidate(new RTCIceCandidate(c)); }catch(e){
+      console.warn('flushIce error:',e.message);
+    }
+  }
 }
 
 function gatherICE(pc){
